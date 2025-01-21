@@ -19,7 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-public class S3Service2Test {
+public class S3ServiceTest {
 
     @Mock
     private S3Client s3Client;
