@@ -2,7 +2,7 @@
 
 ## Overview
 
-QTeam Solutions is a Java-based project
+Problem for QTeam Solutions
 
 ## Features
 
