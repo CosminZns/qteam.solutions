@@ -31,5 +31,4 @@ Problem for QTeam Solutions
 ## Running the Application
 
 To run the application, execute the `Main` class:
-```sh
-mvn exec:java -Dexec.mainClass="be.everesst.socialriskdeclaration.Main"
+
