@@ -1,11 +1,16 @@
 package be.everesst.socialriskdeclaration;
 
+import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
 import java.io.File;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
+
+import static be.everesst.socialriskdeclaration.Type.FILE;
+import static be.everesst.socialriskdeclaration.Type.FOLDER;
 
 public class S3Service {
 
@@ -19,51 +24,75 @@ public class S3Service {
 
     public ListResult<Resource> listFolder(Resource parent, String cursor) {
         try {
+            String prefix = parent != null ? parent.name() + "/" : "";
             ListObjectsV2Request.Builder requestBuilder = ListObjectsV2Request.builder()
                     .bucket(bucketName)
-                    .prefix(parent != null ? parent.id() + "/" : "")
+                    .prefix(prefix)
+                    .delimiter("/")
                     .continuationToken(cursor);
 
             ListObjectsV2Response response = s3Client.listObjectsV2(requestBuilder.build());
+            List<Resource> resources = new ArrayList<>();
 
-            List<Resource> resources = response.contents().stream()
-                    .map(s3Object -> new Resource(s3Object.key(), s3Object.key(), s3Object.size() == 0 ? 1 : 0))
-                    .toList();
+            response.commonPrefixes().forEach(prefixPath -> addFolders(prefixPath, prefix, resources));
+            response.contents().forEach(content -> addFiles(content, prefix, resources));
 
             return new ListResult<>(resources, response.nextContinuationToken());
         } catch (S3Exception e) {
-            throw new RuntimeException("Error listing folder contents: " + e.awsErrorDetails().errorMessage(), e);
+            throw new RuntimeException("Failed to list folder contents: " + e.getMessage(), e);
         }
+
     }
 
     public Resource getResource(String id) {
+        if (id == null || id.isEmpty()) {
+            throw new IllegalArgumentException("Resource ID cannot be null or empty");
+        }
         try {
             HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
                     .bucket(bucketName)
                     .key(id)
                     .build();
-
             HeadObjectResponse headObjectResponse = s3Client.headObject(headObjectRequest);
 
-            return new Resource(id, id, headObjectResponse.contentLength() == 0 ? 1 : 0);
+            String name = id.substring(id.lastIndexOf('/') + 1);
+            int type = headObjectResponse.contentLength() == 0 ? FOLDER.getValue() : FILE.getValue();
+
+            return new Resource(id, name, type);
         } catch (S3Exception e) {
             throw new RuntimeException("Error getting resource: " + e.awsErrorDetails().errorMessage(), e);
         }
     }
 
     public File getAsFile(Resource resource) {
+        if (resource == null) {
+            throw new IllegalArgumentException("Resource cannot be null");
+        }
         try {
-            GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+            File file = new File(resource.name());
+            GetObjectRequest request = GetObjectRequest.builder()
                     .bucket(bucketName)
                     .key(resource.id())
                     .build();
 
-            File file = new File("/tmp/" + resource.name());
-            s3Client.getObject(getObjectRequest, Paths.get(file.getPath()));
+            s3Client.getObject(request, ResponseTransformer.toFile(Paths.get(file.getAbsolutePath())));
 
             return file;
         } catch (S3Exception e) {
-            throw new RuntimeException("Error downloading file: " + e.awsErrorDetails().errorMessage(), e);
+            throw new RuntimeException("Error getting resource: " + e.awsErrorDetails().errorMessage(), e);
         }
     }
+
+    private void addFiles(S3Object content, String prefix, List<Resource> resources) {
+        if (!content.key().equals(prefix)) {
+            String name = content.key().substring(prefix.length());
+            resources.add(new Resource(content.key(), name, FILE.getValue()));
+        }
+    }
+
+    private void addFolders(CommonPrefix prefixPath, String prefix, List<Resource> resources) {
+        String name = prefixPath.prefix().substring(prefix.length(), prefixPath.prefix().length() - 1);
+        resources.add(new Resource(prefixPath.prefix(), name, FOLDER.getValue()));
+    }
+
 }

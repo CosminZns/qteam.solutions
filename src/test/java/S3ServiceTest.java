@@ -7,14 +7,18 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
 import java.io.File;
-import java.nio.file.Path;
+import java.util.List;
 
+import static be.everesst.socialriskdeclaration.Type.FILE;
+import static be.everesst.socialriskdeclaration.Type.FOLDER;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -34,74 +38,99 @@ public class S3ServiceTest {
     }
 
     @Test
-    public void testListFolder() {
-        ListObjectsV2Response response = ListObjectsV2Response.builder()
-                .contents(S3Object.builder().key("file1.txt").size(100L).build())
-                .nextContinuationToken("next-token")
+    public void testListFolder_Success() {
+        ListObjectsV2Response mockResponse = ListObjectsV2Response.builder()
+                .contents(List.of(
+                        S3Object.builder().key("folder1/file1.txt").size(100L).build(),
+                        S3Object.builder().key("folder1/file2.txt").size(200L).build()
+                ))
+                .commonPrefixes(CommonPrefix.builder().prefix("folder1/subfolder1/").build())
+                .nextContinuationToken("next-cursor")
                 .build();
 
-        when(s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(response);
+        when(s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(mockResponse);
 
-        Resource parent = new Resource("parent-folder", "parent-folder", 1);
+        Resource parent = new Resource("folder1/", "folder1", FOLDER.getValue());
         ListResult<Resource> result = s3Service.listFolder(parent, null);
 
         assertNotNull(result);
-        assertEquals(1, result.resources().size());
-        assertEquals("file1.txt", result.resources().get(0).id());
-        assertEquals("next-token", result.cursor());
+        assertEquals(3, result.resources().size());
+        assertEquals("next-cursor", result.cursor());
+
+        Resource folder = result.resources().getFirst();
+        assertEquals("folder1/subfolder1/", folder.id());
+        assertEquals("subfolder1", folder.name());
+        assertEquals(FOLDER.getValue(), folder.type());
+
+        Resource file = result.resources().get(1);
+        assertEquals("folder1/file1.txt", file.id());
+        assertEquals("file1.txt", file.name());
+        assertEquals(FILE.getValue(), file.type());
     }
 
     @Test
-    public void testGetResource() {
-        HeadObjectResponse response = HeadObjectResponse.builder()
-                .contentLength(100L)
+    public void testGetResource_Success() {
+        HeadObjectResponse mockResponse = HeadObjectResponse.builder()
+                .contentLength(1234L)
                 .build();
 
-        when(s3Client.headObject(any(HeadObjectRequest.class))).thenReturn(response);
+        when(s3Client.headObject(any(HeadObjectRequest.class))).thenReturn(mockResponse);
 
-        Resource resource = s3Service.getResource("file1.txt");
+        Resource result = s3Service.getResource("folder1/file1.txt");
 
-        assertNotNull(resource);
-        assertEquals("file1.txt", resource.id());
-        assertEquals(0, resource.type());
+        assertNotNull(result);
+        assertEquals("folder1/file1.txt", result.id());
+        assertEquals("file1.txt", result.name());
+        assertEquals(FILE.getValue(), result.type());
     }
 
     @Test
-    public void testGetAsFile() {
-        GetObjectResponse response = GetObjectResponse.builder().build();
+    public void testGetAsFile_Success() {
+        GetObjectResponse mockResponse = GetObjectResponse.builder().build();
+        when(s3Client.getObject(any(GetObjectRequest.class), any(ResponseTransformer.class))).thenReturn(mockResponse);
 
-        when(s3Client.getObject(any(GetObjectRequest.class), any(Path.class))).thenReturn(response);
+        Resource resource = new Resource("folder1/file1.txt", "file1.txt", FILE.getValue());
 
-        Resource resource = new Resource("file1.txt", "file1.txt", 0);
-        File file = s3Service.getAsFile(resource);
+        File result = s3Service.getAsFile(resource);
 
-        assertNotNull(file);
-        assertEquals("/tmp/file1.txt", file.getPath());
+        assertNotNull(result);
+        assertEquals("file1.txt", result.getName());
     }
 
     @Test
-    public void testListFolderException() {
-        when(s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenThrow(S3Exception.builder().message("Error listing folder").build());
+    public void testListFolder_InvalidBucketName() {
+        when(s3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+                .thenThrow(S3Exception.builder().message("The specified bucket does not exist").build());
 
-        Resource parent = new Resource("parent-folder", "parent-folder", 1);
+        Resource parent = new Resource("invalid-folder", "invalid-folder", FOLDER.getValue());
 
-        assertThrows(RuntimeException.class, () -> s3Service.listFolder(parent, null));
+        RuntimeException exception = assertThrows(RuntimeException.class, () -> s3Service.listFolder(parent, null));
+        assertEquals("Failed to list folder contents: The specified bucket does not exist", exception.getMessage());
     }
 
     @Test
-    public void testGetResourceException() {
-        when(s3Client.headObject(any(HeadObjectRequest.class))).thenThrow(S3Exception.builder().message("Error getting resource").build());
+    public void testGetResource_NonExistentFile() {
+        AwsErrorDetails errorDetails = AwsErrorDetails.builder().errorMessage("The specified key does not exist").build();
+        AwsServiceException s3Exception = S3Exception.builder().awsErrorDetails(errorDetails).build();
 
-        assertThrows(RuntimeException.class, () -> s3Service.getResource("file1.txt"));
+        when(s3Client.headObject(any(HeadObjectRequest.class))).thenThrow(s3Exception);
+
+        RuntimeException exception = assertThrows(RuntimeException.class, () -> s3Service.getResource("non-existent-file.txt"));
+        assertEquals("Error getting resource: The specified key does not exist", exception.getMessage());
     }
 
     @Test
-    public void testGetAsFileException() {
-        when(s3Client.getObject(any(GetObjectRequest.class), any(Path.class))).thenThrow(S3Exception.builder().message("Error downloading file").build());
+    public void testGetAsFile_InvalidFilePath() {
+        AwsErrorDetails errorDetails = AwsErrorDetails.builder().errorMessage("The specified key does not exist").build();
+        AwsServiceException s3Exception = S3Exception.builder().awsErrorDetails(errorDetails).build();
 
-        Resource resource = new Resource("file1.txt", "file1.txt", 0);
+        when(s3Client.getObject(any(GetObjectRequest.class), any(ResponseTransformer.class))).thenThrow(s3Exception);
 
-        assertThrows(RuntimeException.class, () -> s3Service.getAsFile(resource));
+        Resource resource = new Resource("invalid-path/file.txt", "file.txt", FILE.getValue());
+
+        RuntimeException exception = assertThrows(RuntimeException.class, () -> s3Service.getAsFile(resource));
+        assertEquals("Error getting resource: The specified key does not exist", exception.getMessage());
     }
+
 
 }
